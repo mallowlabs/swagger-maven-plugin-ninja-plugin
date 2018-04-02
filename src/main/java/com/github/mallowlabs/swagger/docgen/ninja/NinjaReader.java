@@ -7,15 +7,14 @@ import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import javax.ws.rs.Consumes;
-import javax.ws.rs.Produces;
-
 import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.reflect.TypeUtils;
 import org.apache.maven.plugin.logging.Log;
 import org.reflections.Reflections;
 import org.springframework.core.DefaultParameterNameDiscoverer;
@@ -49,12 +48,15 @@ import io.swagger.models.properties.ArrayProperty;
 import io.swagger.models.properties.MapProperty;
 import io.swagger.models.properties.Property;
 import io.swagger.models.properties.RefProperty;
+import io.swagger.util.ParameterProcessor;
 import ninja.Bootstrap;
+import ninja.Context;
 import ninja.Route;
 import ninja.Router;
 import ninja.servlet.NinjaServletBootstrap;
 import ninja.utils.NinjaMode;
 import ninja.utils.NinjaPropertiesImpl;
+import ninja.validation.Validation;
 
 public class NinjaReader extends JaxrsReader {
     private static final ResponseContainerConverter RESPONSE_CONTAINER_CONVERTER = new ResponseContainerConverter();
@@ -67,9 +69,9 @@ public class NinjaReader extends JaxrsReader {
     protected void updateExtensionChain() {
         List<SwaggerExtension> extensions = new ArrayList<SwaggerExtension>();
         extensions.add(new BeanParamInjectParamExtention());
+        extensions.add(new NinjaParameterExtension());
         extensions.add(new SwaggerJerseyJaxrs());
         extensions.add(new JaxrsParameterExtension());
-        extensions.add(new NinjaParameterExtension());
         SwaggerExtensions.setExtensions(extensions);
     }
 
@@ -114,29 +116,33 @@ public class NinjaReader extends JaxrsReader {
 
                         LOG.debug("Making: " + httpMethod + " " + operationPath);
 
+                        Map<String, String> regexMap = new HashMap<String, String>();
+
                         Operation operation = parseMethod(method);
-                        // updateOperationParameters(parentParameters,
-                        // regexMap, operation);
+                        updateOperationParameters(new ArrayList<Parameter>(), regexMap, operation);
                         updateOperationProtocols(apiOperation, operation);
 
                         String[] apiConsumes = new String[0];
                         String[] apiProduces = new String[0];
 
-                        Consumes consumes = AnnotationUtils.findAnnotation(cls, Consumes.class);
-                        if (consumes != null) {
-                            apiConsumes = consumes.value();
-                        }
-                        Produces produces = AnnotationUtils.findAnnotation(cls, Produces.class);
-                        if (produces != null) {
-                            apiProduces = produces.value();
-                        }
-
-                        apiConsumes = updateOperationConsumes(new String[0], apiConsumes, operation);
-                        apiProduces = updateOperationProduces(new String[0], apiProduces, operation);
+                        // Consumes consumes =
+                        // AnnotationUtils.findAnnotation(cls, Consumes.class);
+                        // if (consumes != null) {
+                        // apiConsumes = consumes.value();
+                        // }
+                        // Produces produces =
+                        // AnnotationUtils.findAnnotation(cls, Produces.class);
+                        // if (produces != null) {
+                        // apiProduces = produces.value();
+                        // }
+                        //
+                        // apiConsumes = updateOperationConsumes(new String[0],
+                        // apiConsumes, operation);
+                        // apiProduces = updateOperationProduces(new String[0],
+                        // apiProduces, operation);
 
                         // handleSubResource(apiConsumes, httpMethod,
-                        // apiProduces, tags, method, operationPath,
-                        // operation);
+                        // apiProduces, tags, method, operationPath, operation);
 
                         // can't continue without a valid http method
                         updateTagsForOperation(operation, apiOperation);
@@ -329,6 +335,42 @@ public class NinjaReader extends JaxrsReader {
         processOperationDecorator(operation, method);
 
         return operation;
+    }
+
+    protected List<Parameter> getParameters(Type type, List<Annotation> annotations) {
+        // if (!hasValidAnnotations(annotations) ||
+        // isApiParamHidden(annotations)) {
+        // return Collections.emptyList();
+        // }
+        Set<Type> typesToSkip = new HashSet<Type>();
+        typesToSkip.add(Context.class);
+        typesToSkip.add(Validation.class);
+
+        Iterator<SwaggerExtension> chain = SwaggerExtensions.chain();
+        List<Parameter> parameters = new ArrayList<Parameter>();
+        Class<?> cls = TypeUtils.getRawType(type, type);
+        LOG.debug("Looking for path/query/header/form/cookie params in " + cls);
+
+        if (chain.hasNext()) {
+            SwaggerExtension extension = chain.next();
+            LOG.debug("trying extension " + extension);
+            parameters = extension.extractParameters(annotations, type, typesToSkip, chain);
+        }
+
+        if (!parameters.isEmpty()) {
+            for (Parameter parameter : parameters) {
+                ParameterProcessor.applyAnnotations(swagger, parameter, type, annotations);
+            }
+        } else {
+            LOG.debug("Looking for body params in " + cls);
+            if (!typesToSkip.contains(type)) {
+                Parameter param = ParameterProcessor.applyAnnotations(swagger, null, type, annotations);
+                if (param != null) {
+                    parameters.add(param);
+                }
+            }
+        }
+        return parameters;
     }
 
     void processOperationDecorator(Operation operation, Method method) {
